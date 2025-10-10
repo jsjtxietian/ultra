@@ -2,8 +2,8 @@
   "profiles": {
     "Ultra": {
       "commandName": "Project",
-      "commandLineArgs": "convert --pid 472972 .\\ultra_Ultra.Example_2024-11-18_12_04_12.etl",
-      "workingDirectory": "C:\\code\\Captures"
+      "commandLineArgs": "profile --symbol-path=\"D:\\Temp\\SymbolCache\" -- D:\\Temp\\PackagedGame\\Windows\\Product\\Binaries\\Win64\\Product.exe",
+      "workingDirectory": "D:\\Repos\\ultra\\src\\Ultra\\bin\\Debug\\net8.0"
     }
   }
 }
