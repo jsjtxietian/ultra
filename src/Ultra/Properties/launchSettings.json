@@ -2,7 +2,7 @@
   "profiles": {
     "Ultra": {
       "commandName": "Project",
-      "commandLineArgs": "profile --symbol-path=\"D:\\Temp\\SymbolCache\" -- D:\\Temp\\PackagedGame\\Windows\\Product\\Binaries\\Win64\\Product.exe",
+      "commandLineArgs": "profile --symbol-path=\"D:\\Temp\\SymbolCache;SRV*D:\\Temp\\SymbolCache*https://msdl.microsoft.com/download/symbols\" -- D:\\Temp\\PackagedGame\\Windows\\Product\\Binaries\\Win64\\Product.exe",
       "workingDirectory": "D:\\Repos\\ultra\\src\\Ultra\\bin\\Debug\\net8.0"
     }
   }

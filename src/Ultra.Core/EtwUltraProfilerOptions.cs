@@ -23,7 +23,7 @@ public class EtwUltraProfilerOptions
         KeepMergedEtl = false;
         KeepEtlIntermediateFiles = false;
         DelayInSeconds = 0.0; // 0 seconds
-        DurationInSeconds = 120.0; // 120 seconds
+        DurationInSeconds = 999.0; // 120 seconds
         MinimumCpuTimeBeforeThreadIsVisibleInMs = 10.0;
     }
 
