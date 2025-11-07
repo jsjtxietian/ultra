@@ -20,6 +20,7 @@ internal class Program
         Console.OutputEncoding = Encoding.UTF8;
 
         List<int> pidList = new();
+        string? processNameFilter = null;
 
         bool verbose = false;
         var options = new EtwUltraProfilerOptions();
@@ -37,11 +38,12 @@ internal class Program
             "Available commands:",
             new Command("profile", "Profile a new process or attach to an existing process")
             {
-                new CommandUsage("Usage: {NAME} [Options] <pid | -- execName arg0 arg1...>"),
+                new CommandUsage("Usage: {NAME} [Options] <pid | name | -- execName arg0 arg1...>"),
                 _,
                 new HelpOption(),
                 { "o|output=", "The base output {FILE} name. Default is ultra_<process_name>_yyyy-MM-dd_HH_mm_ss.", v => options.BaseOutputFileName = v },
                 { "pid=", "The {PID} of the process to attach the profiler to.", (int pid) => { pidList.Add(pid); } },
+                { "name=", "The {NAME} pattern to find processes to attach the profiler to.", (string? name) => { processNameFilter = name; } },
                 { "sampling-interval=", $"The {{VALUE}} of the sample interval in ms. Default is 8190Hz = {options.CpuSamplingIntervalInMs:0.000}ms.", (float v) => options.CpuSamplingIntervalInMs  = v },
                 { "symbol-path=", $"The {{VALUE}} of symbol path. The default value is `{options.GetCachedSymbolPath()}`.", v => options.SymbolPathText  = v },
                 { "paused", "Launch the profiler paused and wait for SPACE or ENTER keys to be pressed.", v => options.Paused = v is not null },
@@ -68,9 +70,9 @@ internal class Program
                 // Action for the commit command
                 async (ctx, arguments) =>
                 {
-                    if (arguments.Length == 0 && pidList.Count == 0)
+                    if (arguments.Length == 0 && pidList.Count == 0 && processNameFilter == null)
                     {
-                        AnsiConsole.MarkupLine("[red]Missing pid or executable name[/]");
+                        AnsiConsole.MarkupLine("[red]Missing pid, name, or executable name[/]");
                         return 1;
                     }
 
@@ -85,6 +87,32 @@ internal class Program
                     
                     // Add the pid passed as options
                     options.ProcessIds.AddRange(pidList);
+
+                    // Handle process name filter
+                    if (processNameFilter != null)
+                    {
+                        var matchingProcesses = FindProcessesByName(processNameFilter);
+                        if (matchingProcesses.Count == 0)
+                        {
+                            AnsiConsole.MarkupLine($"[red]No processes found matching '{processNameFilter}'[/]");
+                            return 1;
+                        }
+                        else if (matchingProcesses.Count > 1)
+                        {
+                            // Select the process with the largest PID
+                            var selectedProcess = matchingProcesses.OrderByDescending(p => p.PagedMemorySize64).First();
+                            var windowTitle = selectedProcess.MainWindowTitle ?? "";
+                            AnsiConsole.MarkupLine($"[green]Multiple processes found. Selected process with highest memory:\n pid: {selectedProcess.Id} - Window: {windowTitle}[/]");
+                            options.ProcessIds.Add(selectedProcess.Id);
+                        }
+                        else
+                        {
+                            // Only one matching process found
+                            var selectedProcess = matchingProcesses[0];
+                            AnsiConsole.MarkupLine($"[green]Found process: {selectedProcess.ProcessName} (PID: {selectedProcess.Id})[/]");
+                            options.ProcessIds.Add(selectedProcess.Id);
+                        }
+                    }
 
                     if (arguments.Length == 1 && int.TryParse(arguments[0], out var pid))
                     {
@@ -474,5 +502,31 @@ internal class Program
                 Table.ShowFooters = true;
             }
         }
+    }
+
+    private static List<System.Diagnostics.Process> FindProcessesByName(string namePattern)
+    {
+        var matchingProcesses = new List<System.Diagnostics.Process>();
+        var processes = System.Diagnostics.Process.GetProcesses();
+
+        foreach (var process in processes)
+        {
+            try
+            {
+                // Check if process name contains the pattern (case-insensitive)
+                if (!string.IsNullOrEmpty(process.ProcessName) &&
+                    process.ProcessName.Contains(namePattern, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchingProcesses.Add(process);
+                }
+            }
+            catch
+            {
+                // Skip processes we can't access
+                continue;
+            }
+        }
+
+        return matchingProcesses;
     }
 }
