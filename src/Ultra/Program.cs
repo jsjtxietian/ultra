@@ -22,6 +22,7 @@ internal class Program
         List<int> pidList = new();
         string? processNameFilter = null;
 
+        bool noOpenInBrowser = false;
         bool verbose = false;
         var options = new EtwUltraProfilerOptions();
 
@@ -44,6 +45,7 @@ internal class Program
                 { "o|output=", "The base output {FILE} name. Default is ultra_<process_name>_yyyy-MM-dd_HH_mm_ss.", v => options.BaseOutputFileName = v },
                 { "pid=", "The {PID} of the process to attach the profiler to.", (int pid) => { pidList.Add(pid); } },
                 { "name=", "The {NAME} pattern to find processes to attach the profiler to.", (string? name) => { processNameFilter = name; } },
+                { "no-open", "Do not open the profile in the browser automatically.", v => noOpenInBrowser = v is not null },
                 { "sampling-interval=", $"The {{VALUE}} of the sample interval in ms. Default is 8190Hz = {options.CpuSamplingIntervalInMs:0.000}ms.", (float v) => options.CpuSamplingIntervalInMs  = v },
                 { "symbol-path=", $"The {{VALUE}} of symbol path. The default value is `{options.GetCachedSymbolPath()}`.", v => options.SymbolPathText  = v },
                 { "paused", "Launch the profiler paused and wait for SPACE or ENTER keys to be pressed.", v => options.Paused = v is not null },
@@ -130,7 +132,7 @@ internal class Program
 
                     var etwProfiler = new EtwUltraProfiler();
 
-                    Console.CancelKeyPress += (sender, eventArgs) =>
+                    ConsoleCancelEventHandler? profilingCtrlCHandler = (sender, eventArgs) =>
                     {
                         AnsiConsole.WriteLine();
                         AnsiConsole.MarkupLine("[darkorange]Cancelled via CTRL+C[/]");
@@ -141,6 +143,8 @@ internal class Program
                             AnsiConsole.MarkupLine("[red]Stopped via CTRL+C[/]");
                         }
                     };
+
+                    Console.CancelKeyPress += profilingCtrlCHandler;
 
                     // Handle paused
                     if (options.Paused)
@@ -321,7 +325,26 @@ internal class Program
                     if (fileOutput != null)
                     {
                         AnsiConsole.MarkupLine($"Generated Firefox Profiler JSON file -> [green]{fileOutput}[/] - {ByteSize.FromBytes(new FileInfo(fileOutput).Length)}");
-                        AnsiConsole.MarkupLine($"Go to [blue]https://profiler.firefox.com/ [/]");
+
+                        if (noOpenInBrowser)
+                        {
+                            AnsiConsole.MarkupLine($"Go to [blue]https://profiler.firefox.com/ [/]");
+                        }
+                        else
+                        {
+                            var cts = new CancellationTokenSource();
+                            if (profilingCtrlCHandler != null)
+                            {
+                                Console.CancelKeyPress -= profilingCtrlCHandler;
+                            }
+                            Console.CancelKeyPress += (sender, eventArgs) =>
+                            {
+                                AnsiConsole.MarkupLine("\n[grey]Server shutdown requested. Exiting...[/]");
+                                cts.Cancel();
+                                eventArgs.Cancel = true;
+                            };
+                            await Ultra.ProfileHttpServer.StartAndOpen(fileOutput, cts.Token);
+                        }
                     }
 
                     return 0;
