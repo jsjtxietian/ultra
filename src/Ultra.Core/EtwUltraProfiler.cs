@@ -449,6 +449,8 @@ public class EtwUltraProfiler : IDisposable
                            | KernelTraceEventParser.Keywords.ImageLoad
                            | KernelTraceEventParser.Keywords.Process
                            | KernelTraceEventParser.Keywords.Thread;
+                           //| KernelTraceEventParser.Keywords.FileIO
+                           //| KernelTraceEventParser.Keywords.FileIOInit;
         _kernelSession.EnableKernelProvider(kernelEvents, KernelTraceEventParser.Keywords.Profile);
 
         var jitEvents = ClrTraceEventParser.Keywords.JITSymbols |
@@ -468,6 +470,12 @@ public class EtwUltraProfiler : IDisposable
             TraceEventLevel.Verbose, // For call stacks.
             (ulong)jitEvents, options);
 
+        var dxgiProviderGuid = TraceEventProviders.GetProviderGuidByName("Microsoft-Windows-DXGI");
+        _userSession.EnableProvider(
+            dxgiProviderGuid,
+            TraceEventLevel.Verbose, // 捕获所有事件
+            0xFFFFFFFFFFFFFFFF,      // 启用所有关键字 (Keywords)
+            options);
 
         // Reset the clock to account for the duration of the profiler
         _profilerClock.Restart();

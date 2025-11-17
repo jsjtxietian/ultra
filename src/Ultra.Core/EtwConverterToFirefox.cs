@@ -456,6 +456,73 @@ public sealed class EtwConverterToFirefox : IDisposable
                                 markers.Length++;
                             }
                         }
+                        else if (evt is FileIOCreateTraceData fileCreate)
+                        {
+                            markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                            markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                            markers.Category.Add(CategoryOther); // 使用 "Other" 类别
+                            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
+                            markers.ThreadId.Add(_profileThreadIndex);
+                            markers.Name.Add(GetOrCreateString("File IO", profileThread));
+
+                            var fileIOEvent = new FileIOEvent
+                            {
+                                FileName = fileCreate.FileName,
+                                OperationType = "Create"
+                            };
+                            markers.Data.Add(fileIOEvent);
+                            markers.Length++;
+                        }
+                        else if (evt is FileIOReadWriteTraceData fileReadWrite)
+                        {
+                            markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                            markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                            markers.Category.Add(CategoryOther);
+                            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
+                            markers.ThreadId.Add(_profileThreadIndex);
+                            markers.Name.Add(GetOrCreateString("File IO", profileThread));
+
+                            var fileIOEvent = new FileIOEvent
+                            {
+                                FileName = fileReadWrite.FileName,
+                                // 操作码将是 "Read" 或 "Write"
+                                OperationType = fileReadWrite.OpcodeName + " size:" + fileReadWrite.IoSize,
+                            };
+                            markers.Data.Add(fileIOEvent);
+                            markers.Length++;
+                        }
+                        else if (evt is FileIOInfoTraceData fileEvent)
+                        {
+                            markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                            markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                            markers.Category.Add(CategoryOther); // 使用 "Other" 类别
+                            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance); // 瞬时事件
+                            markers.ThreadId.Add(_profileThreadIndex);
+                            markers.Name.Add(GetOrCreateString("File IO", profileThread));
+
+                            var fileIOEvent = new FileIOEvent
+                            {
+                                FileName = fileEvent.FileName,
+                                OperationType = fileEvent.OpcodeName,
+                            };
+                            markers.Data.Add(fileIOEvent);
+                            markers.Length++;
+                        }
+                        else if (evt.ProviderName == "Microsoft-Windows-DXGI")
+                        {
+                            if (evt.EventName == "Present/Start")
+                            {
+                                markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                                markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                                markers.Category.Add(CategoryOther);
+                                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
+                                markers.ThreadId.Add(_profileThreadIndex);
+                                markers.Name.Add(GetOrCreateString(FramePresentEvent.TypeId, profileThread));
+
+                                markers.Data.Add(null);
+                                markers.Length++;
+                            }
+                        }
                     }
 
                     continue;
@@ -999,6 +1066,8 @@ public sealed class EtwConverterToFirefox : IDisposable
                     GCAllocationTickEvent.Schema(),
                     GCSuspendExecutionEngineEvent.Schema(),
                     GCRestartExecutionEngineEvent.Schema(),
+                    FileIOEvent.Schema(),
+                    FramePresentEvent.Schema(),
                 }
             }
         };
