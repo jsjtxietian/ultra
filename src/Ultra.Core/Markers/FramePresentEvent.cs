@@ -49,7 +49,7 @@ public class FramePresentEvent : FirefoxProfiler.MarkerPayload
             Name = TypeId,
             
             // 定义在 UI 上的显示格式
-            ChartLabel = "Frame Present (SwapChain: {marker.data.swapChainAddress})",
+            ChartLabel = "Frame Present",
             TableLabel = "Frame Present",
 
             Display =

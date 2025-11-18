@@ -52,7 +52,8 @@ public class FileIOEvent : FirefoxProfiler.MarkerPayload
             Display =
             {
                 FirefoxProfiler.MarkerDisplayLocation.MarkerChart,
-                FirefoxProfiler.MarkerDisplayLocation.MarkerTable
+                FirefoxProfiler.MarkerDisplayLocation.MarkerTable,
+                FirefoxProfiler.MarkerDisplayLocation.TimelineFileio, // TODO: check UI
             },
 
             Data =

@@ -218,6 +218,9 @@ public sealed class EtwConverterToFirefox : IDisposable
             Stack<double> gcRestartEEEvents = new();
             Stack<(double, GCEvent)> gcStartStopEvents = new();
 
+            double lastPresentTimeMs = -1.0; // -1.0 表示 "尚未记录"
+            const double JankThresholdMs = 60;
+
             string threadBaseName;
             if (!_threadNames.TryGetValue(thread.ThreadID, out var dynamicThreadName))
             {
@@ -521,6 +524,36 @@ public sealed class EtwConverterToFirefox : IDisposable
 
                                 markers.Data.Add(null);
                                 markers.Length++;
+
+                                // jank
+                                double currentPresentTimeMs = evt.TimeStampRelativeMSec;
+                                if (lastPresentTimeMs >= 0) // 确保这不是第一帧
+                                {
+                                    double frameTimeMs = currentPresentTimeMs - lastPresentTimeMs;
+
+                                    if (frameTimeMs > JankThresholdMs)
+                                    {
+                                        // 创建一个区间 (Interval) Marker 来标记卡顿
+                                        markers.StartTime.Add(lastPresentTimeMs); // 卡顿帧的开始时间
+                                        markers.EndTime.Add(currentPresentTimeMs); // 卡顿帧的结束时间
+                                        markers.Category.Add(CategoryOther); // 或者 CategoryGc (4) 让它显示为黄色
+                                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval); // 这是一个区间
+                                        markers.ThreadId.Add(_profileThreadIndex);
+
+                                        // 引用 JankEvent.TypeId
+                                        markers.Name.Add(GetOrCreateString(JankEvent.TypeId, profileThread));
+
+                                        var jankEvent = new JankEvent
+                                        {
+                                            FrameTimeMs = frameTimeMs
+                                        };
+                                        markers.Data.Add(jankEvent);
+                                        markers.Length++;
+                                    }
+                                }
+
+                                // 始终更新上一帧的时间，为下一次计算做准备
+                                lastPresentTimeMs = currentPresentTimeMs;
                             }
                         }
                     }
@@ -1068,6 +1101,7 @@ public sealed class EtwConverterToFirefox : IDisposable
                     GCRestartExecutionEngineEvent.Schema(),
                     FileIOEvent.Schema(),
                     FramePresentEvent.Schema(),
+                    JankEvent.Schema()
                 }
             }
         };
