@@ -21,6 +21,7 @@ public sealed class EtwConverterToFirefox : IDisposable
 {
     private readonly Dictionary<ModuleFileIndex, int> _mapModuleFileIndexToFirefox;
     private readonly HashSet<ModuleFileIndex> _setManagedModules;
+    private readonly HashSet<ModuleFileIndex> _systemModules;
     private readonly Dictionary<CallStackIndex, int> _mapCallStackIndexToFirefox;
     private readonly Dictionary<CodeAddressIndex, int> _mapCodeAddressIndexToFirefox;
     private readonly Dictionary<CodeAddressIndex, int> _mapCodeAddressIndexToMethodIndexFirefox;
@@ -94,6 +95,7 @@ public sealed class EtwConverterToFirefox : IDisposable
         _mapMethodIndexToFirefox = new();
         _mapStringToFirefox = new(StringComparer.Ordinal);
         _setManagedModules = new();
+        _systemModules = new();
         _threadNames = new();
     }
 
@@ -676,6 +678,7 @@ public sealed class EtwConverterToFirefox : IDisposable
         _options.LogProgress?.Invoke($"Loading Modules for process {process.Name} ({process.ProcessID})");
 
         _setManagedModules.Clear();
+        _systemModules.Clear();
         _clrJitModuleIndex = ModuleFileIndex.Invalid;
         _coreClrModuleIndex = ModuleFileIndex.Invalid;
 
@@ -725,6 +728,15 @@ public sealed class EtwConverterToFirefox : IDisposable
                     {
                         _setManagedModules.Add(otherModule.ModuleFile.ModuleFileIndex);
                     }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(module.FilePath))
+            {
+                if (module.FilePath.Contains("\\Windows\\System32", StringComparison.OrdinalIgnoreCase) ||
+                    module.FilePath.Contains("\\Windows\\SysWOW64", StringComparison.OrdinalIgnoreCase))
+                {
+                    _systemModules.Add(module.ModuleFile.ModuleFileIndex);
                 }
             }
         }
@@ -842,6 +854,10 @@ public sealed class EtwConverterToFirefox : IDisposable
                 else if (module.ModuleFileIndex == _coreClrModuleIndex)
                 {
                     category = CategoryClr;
+                }
+                else if (_systemModules.Contains(module.ModuleFileIndex))
+                {
+                    category = CategoryKernel;
                 }
             }
         }
@@ -1047,7 +1063,7 @@ public sealed class EtwConverterToFirefox : IDisposable
                     new FirefoxProfiler.Category()
                     {
                         Name = "Native",
-                        Color = FirefoxProfiler.ProfileColor.Blue,
+                        Color = FirefoxProfiler.ProfileColor.Yellow,
                         Subcategories =
                         {
                             "Other",
