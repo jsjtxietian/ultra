@@ -14,7 +14,7 @@ public class JankEvent : FirefoxProfiler.MarkerPayload
     /// <summary>
     /// 事件的类型 ID.
     /// </summary>
-    public const string TypeId = "Game.Jank"; // 自定义名称
+    public const string TypeId = "CC";  // hack
 
     /// <summary>
     /// Initializes a new instance of the <see cref="JankEvent"/> class.
@@ -47,7 +47,7 @@ public class JankEvent : FirefoxProfiler.MarkerPayload
 
             // 定义在 UI 上的显示格式
             // {marker.data.frameTimeMs;duration} 会自动将毫秒格式化为 e.g. "50.2ms"
-            ChartLabel = "Jank!",
+            ChartLabel = "Jank! {marker.data.frameTimeMs}",
             TableLabel = "Jank Event",
 
             Display =

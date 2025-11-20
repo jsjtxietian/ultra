@@ -517,15 +517,15 @@ public sealed class EtwConverterToFirefox : IDisposable
                         {
                             if (evt.EventName == "Present/Start")
                             {
-                                markers.StartTime.Add(evt.TimeStampRelativeMSec);
-                                markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                                markers.Category.Add(CategoryOther);
-                                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
-                                markers.ThreadId.Add(_profileThreadIndex);
-                                markers.Name.Add(GetOrCreateString(FramePresentEvent.TypeId, profileThread));
+                                //markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                                //markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                                //markers.Category.Add(CategoryOther);
+                                //markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
+                                //markers.ThreadId.Add(_profileThreadIndex);
+                                //markers.Name.Add(GetOrCreateString(FramePresentEvent.TypeId, profileThread));
 
-                                markers.Data.Add(null);
-                                markers.Length++;
+                                //markers.Data.Add(null);
+                                //markers.Length++;
 
                                 // jank
                                 double currentPresentTimeMs = evt.TimeStampRelativeMSec;
@@ -536,13 +536,12 @@ public sealed class EtwConverterToFirefox : IDisposable
                                     if (frameTimeMs > JankThresholdMs)
                                     {
                                         // 创建一个区间 (Interval) Marker 来标记卡顿
-                                        markers.StartTime.Add(lastPresentTimeMs); // 卡顿帧的开始时间
-                                        markers.EndTime.Add(currentPresentTimeMs); // 卡顿帧的结束时间
-                                        markers.Category.Add(CategoryOther); // 或者 CategoryGc (4) 让它显示为黄色
-                                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval); // 这是一个区间
+                                        markers.StartTime.Add(lastPresentTimeMs);
+                                        markers.EndTime.Add(currentPresentTimeMs);
+                                        markers.Category.Add(CategoryOther); 
+                                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
                                         markers.ThreadId.Add(_profileThreadIndex);
 
-                                        // 引用 JankEvent.TypeId
                                         markers.Name.Add(GetOrCreateString(JankEvent.TypeId, profileThread));
 
                                         var jankEvent = new JankEvent
