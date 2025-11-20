@@ -2,7 +2,6 @@
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 
-using System.Runtime.InteropServices;
 using ByteSizeLib;
 using Microsoft.Diagnostics.Symbols;
 using Microsoft.Diagnostics.Tracing;
@@ -10,6 +9,8 @@ using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Ultra.Core.Markers;
 
 namespace Ultra.Core;
@@ -36,6 +37,14 @@ public sealed class EtwConverterToFirefox : IDisposable
     private int _profileThreadIndex;
     private readonly EtwUltraProfilerOptions _options;
     private readonly FirefoxProfiler.Profile _profile;
+    private Dictionary<int, Queue<SwitchOutInfo>> _switchOutMap;
+    internal struct SwitchOutInfo
+    {
+        public double Time;
+        public string Reason;
+        public string Mode;
+        public string OldState;
+    }
 
     /// <summary>
     /// A generic other category.
@@ -97,6 +106,7 @@ public sealed class EtwConverterToFirefox : IDisposable
         _setManagedModules = new();
         _systemModules = new();
         _threadNames = new();
+        _switchOutMap = new();
     }
 
     /// <inheritdoc />
@@ -122,6 +132,32 @@ public sealed class EtwConverterToFirefox : IDisposable
 
     private FirefoxProfiler.Profile Convert(List<int> processIds)
     {
+        _etl.Kernel.ThreadCSwitch += (CSwitchTraceData data) =>
+        {
+            // 这里捕获的是“谁被切走了”（OldThreadID）
+            if (!_switchOutMap.TryGetValue(data.OldThreadID, out var queue))
+            {
+                queue = new Queue<SwitchOutInfo>();
+                _switchOutMap[data.OldThreadID] = queue;
+            }
+
+            // hack for KWAIT_REASON
+            string waitReasonStr = data.OldThreadWaitReason.ToString();
+            if (waitReasonStr == "37" || (int)data.OldThreadWaitReason == 37)
+            {
+                waitReasonStr = "WrAlertByThreadId";
+            }
+
+            // 必须拷贝数据，因为 data 对象会被复用
+            queue.Enqueue(new SwitchOutInfo
+            {
+                Time = data.TimeStampRelativeMSec,
+                Reason = waitReasonStr,
+                Mode = data.OldThreadWaitMode.ToString(),
+                OldState = data.OldThreadState.ToString()
+            });
+        };
+
         _etl.Kernel.ThreadSetName += (ThreadSetNameTraceData data) =>
         {
             if (!string.IsNullOrEmpty(data.ThreadName))
@@ -210,6 +246,9 @@ public sealed class EtwConverterToFirefox : IDisposable
                 continue;
             }
 
+            Queue<SwitchOutInfo>? mySwitchOuts = null;
+            _ = _switchOutMap.TryGetValue(thread.ThreadID, out mySwitchOuts);
+
             _mapCallStackIndexToFirefox.Clear();
             _mapCodeAddressIndexToFirefox.Clear();
             _mapMethodIndexToFirefox.Clear();
@@ -291,6 +330,52 @@ public sealed class EtwConverterToFirefox : IDisposable
                         //    // Switch-out
                         //    switchTimeOutMsec = evt.TimeStampRelativeMSec;
                         //}
+
+                        // 确保是当前线程切入 (EventsInThread 里通常都是，但双重检查无害)
+                        if (switchTraceData.ThreadID == thread.ThreadID)
+                        {
+                            switchTimeInMsec = evt.TimeStampRelativeMSec; // 原有逻辑：重置 CPU 计时间
+
+                            // === 新增逻辑：生成 Context Switch Marker ===
+                            if (mySwitchOuts != null && mySwitchOuts.Count > 0)
+                            {
+                                // 从队列中取出对应的 Switch-Out 事件
+                                // 逻辑：Switch-Out 的时间必然早于当前的 Switch-In
+                                // 我们需要把队列里所有早于当前时间的事件都排干，最后一个就是最近的 Switch-Out
+
+                                SwitchOutInfo? matchedSwitchOut = null;
+                                while (mySwitchOuts.Count > 0 && mySwitchOuts.Peek().Time < evt.TimeStampRelativeMSec)
+                                {
+                                    matchedSwitchOut = mySwitchOuts.Dequeue();
+                                }
+
+                                if (matchedSwitchOut.HasValue)
+                                {
+                                    var switchOut = matchedSwitchOut.Value;
+                                    var duration = evt.TimeStampRelativeMSec - switchOut.Time;
+
+                                    // 过滤掉极短的切换（可选，例如小于 0.01ms）
+                                    if (duration > 0.5)
+                                    {
+                                        var cswitchEvent = new ContextSwitchEvent
+                                        {
+                                            WaitReason = switchOut.Reason,
+                                            WaitMode = switchOut.Mode,
+                                            OldState = switchOut.OldState
+                                        };
+
+                                        markers.StartTime.Add(switchOut.Time); // 等待开始时间
+                                        markers.EndTime.Add(evt.TimeStampRelativeMSec); // 等待结束时间（当前）
+                                        markers.Category.Add(CategoryKernel);
+                                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                                        markers.ThreadId.Add(_profileThreadIndex);
+                                        markers.Name.Add(GetOrCreateString("ContextSwitch", profileThread));
+                                        markers.Data.Add(cswitchEvent);
+                                        markers.Length++;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if (evt.ThreadID == thread.ThreadID)
@@ -1116,7 +1201,8 @@ public sealed class EtwConverterToFirefox : IDisposable
                     GCRestartExecutionEngineEvent.Schema(),
                     FileIOEvent.Schema(),
                     FramePresentEvent.Schema(),
-                    JankEvent.Schema()
+                    JankEvent.Schema(),
+                    ContextSwitchEvent.Schema(),
                 }
             }
         };
