@@ -14,7 +14,7 @@ public class JankEvent : FirefoxProfiler.MarkerPayload
     /// <summary>
     /// 事件的类型 ID.
     /// </summary>
-    public const string TypeId = "CC";  // hack
+    public const string TypeId = "Vsync";  // hack
 
     /// <summary>
     /// Initializes a new instance of the <see cref="JankEvent"/> class.

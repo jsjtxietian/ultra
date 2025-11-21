@@ -331,12 +331,8 @@ public sealed class EtwConverterToFirefox : IDisposable
                         //    switchTimeOutMsec = evt.TimeStampRelativeMSec;
                         //}
 
-                        // 确保是当前线程切入 (EventsInThread 里通常都是，但双重检查无害)
                         if (switchTraceData.ThreadID == thread.ThreadID)
                         {
-                            switchTimeInMsec = evt.TimeStampRelativeMSec; // 原有逻辑：重置 CPU 计时间
-
-                            // === 新增逻辑：生成 Context Switch Marker ===
                             if (mySwitchOuts != null && mySwitchOuts.Count > 0)
                             {
                                 // 从队列中取出对应的 Switch-Out 事件
@@ -354,25 +350,25 @@ public sealed class EtwConverterToFirefox : IDisposable
                                     var switchOut = matchedSwitchOut.Value;
                                     var duration = evt.TimeStampRelativeMSec - switchOut.Time;
 
-                                    // 过滤掉极短的切换（可选，例如小于 0.01ms）
-                                    if (duration > 0.5)
-                                    {
-                                        var cswitchEvent = new ContextSwitchEvent
-                                        {
-                                            WaitReason = switchOut.Reason,
-                                            WaitMode = switchOut.Mode,
-                                            OldState = switchOut.OldState
-                                        };
+                                    // TODO: filter out RHIThread, renderthread...
+                                    //if (duration > 0.5)
+                                    //{
+                                    //    var cswitchEvent = new ContextSwitchEvent
+                                    //    {
+                                    //        WaitReason = switchOut.Reason,
+                                    //        WaitMode = switchOut.Mode,
+                                    //        OldState = switchOut.OldState
+                                    //    };
 
-                                        markers.StartTime.Add(switchOut.Time); // 等待开始时间
-                                        markers.EndTime.Add(evt.TimeStampRelativeMSec); // 等待结束时间（当前）
-                                        markers.Category.Add(CategoryKernel);
-                                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                                        markers.ThreadId.Add(_profileThreadIndex);
-                                        markers.Name.Add(GetOrCreateString("ContextSwitch", profileThread));
-                                        markers.Data.Add(cswitchEvent);
-                                        markers.Length++;
-                                    }
+                                    //    markers.StartTime.Add(switchOut.Time); // 等待开始时间
+                                    //    markers.EndTime.Add(evt.TimeStampRelativeMSec); // 等待结束时间（当前）
+                                    //    markers.Category.Add(CategoryKernel);
+                                    //    markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                                    //    markers.ThreadId.Add(_profileThreadIndex);
+                                    //    markers.Name.Add(GetOrCreateString("ContextSwitch", profileThread));
+                                    //    markers.Data.Add(cswitchEvent);
+                                    //    markers.Length++;
+                                    //}
                                 }
                             }
                         }
