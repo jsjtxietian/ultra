@@ -11,6 +11,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json.Nodes;
 using Ultra.Core.Markers;
 
 namespace Ultra.Core;
@@ -20,6 +21,7 @@ namespace Ultra.Core;
 /// </summary>
 public sealed class EtwConverterToFirefox : IDisposable
 {
+    private readonly string _traceFilePath;
     private readonly Dictionary<ModuleFileIndex, int> _mapModuleFileIndexToFirefox;
     private readonly HashSet<ModuleFileIndex> _setManagedModules;
     private readonly HashSet<ModuleFileIndex> _systemModules;
@@ -83,6 +85,7 @@ public sealed class EtwConverterToFirefox : IDisposable
 
     private EtwConverterToFirefox(string traceFilePath, EtwUltraProfilerOptions options)
     {
+        _traceFilePath = traceFilePath;
         _etl = new ETWTraceEventSource(traceFilePath);
         _traceLog = TraceLog.OpenOrConvert(traceFilePath);
 
@@ -183,7 +186,385 @@ public sealed class EtwConverterToFirefox : IDisposable
             ConvertProcess(process);
         }
 
+        var v8ProfilePath = GetV8ProfilePath();
+
+        if (File.Exists(v8ProfilePath))
+        {
+            try
+            {
+                // 自动对齐：尝试用 ETW 中疑似 V8 sampler 线程的首个采样时间作为锚点。
+                AppendV8Thread(v8ProfilePath, double.NaN);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Ultra] Failed to merge V8 profile: {ex.Message}");
+            }
+        }
+
         return _profile;
+    }
+
+    private string GetV8ProfilePath()
+    {
+        static string NormalizeBaseOutputName(string path)
+        {
+            if (path.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase))
+            {
+                return path[..^7];
+            }
+
+            if (path.EndsWith(".cpuprofile", StringComparison.OrdinalIgnoreCase))
+            {
+                return path[..^10];
+            }
+
+            if (path.EndsWith(".etl", StringComparison.OrdinalIgnoreCase))
+            {
+                return path[..^4];
+            }
+
+            return Path.HasExtension(path) ? Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, Path.GetFileNameWithoutExtension(path)) : path;
+        }
+
+        if (!string.IsNullOrEmpty(_options.BaseOutputFileName))
+        {
+            var baseOutput = NormalizeBaseOutputName(_options.BaseOutputFileName);
+            return $"{baseOutput}.cpuprofile";
+        }
+
+        return Path.ChangeExtension(_traceFilePath, ".cpuprofile");
+    }
+
+    private void AppendV8Thread(string v8JsonPath, double timeOffsetMs)
+    {
+        // Note: Firefox's string table (Thread.StringArray) is per-thread. The converter keeps
+        // a per-thread cache in _mapStringToFirefox, so we must reset it before creating a new thread.
+        _mapStringToFirefox.Clear();
+
+        using var stream = File.OpenRead(v8JsonPath);
+        var root = JsonNode.Parse(stream) as JsonObject;
+        if (root is null) return;
+
+        var nodesJson = root["nodes"]?.AsArray();
+        var samplesJson = root["samples"]?.AsArray();
+        var timeDeltasJson = root["timeDeltas"]?.AsArray();
+        if (nodesJson is null || samplesJson is null || timeDeltasJson is null) return;
+
+        // V8 cpu profile timeDeltas are in microseconds.
+        const double MicrosecondsToMilliseconds = 1.0 / 1000.0;
+
+        // Auto-align the V8 profile timeline to ETW timeline if requested.
+        // Strategy:
+        // - Locate an ETW thread that has no name and whose stacks contain V8 modules (e.g. v8_libbase!0x...).
+        // - Use that ETW thread's first sample time (relative ms) as the anchor, and align V8's first sample to it.
+        if (double.IsNaN(timeOffsetMs))
+        {
+            double v8FirstSampleDeltaMs = 0.0;
+            if (timeDeltasJson.Count > 0)
+            {
+                var firstUs = timeDeltasJson[0]?.GetValue<long>() ?? 0;
+                v8FirstSampleDeltaMs = firstUs * MicrosecondsToMilliseconds;
+            }
+
+            FirefoxProfiler.Thread? FindLikelyV8SamplerThread()
+            {
+                FirefoxProfiler.Thread? best = null;
+                var bestScore = 0;
+
+                foreach (var t in _profile.Threads)
+                {
+                    // "Unnamed" threads end up as e.g. "1 - Thread (44800)".
+                    if (string.IsNullOrEmpty(t.Name) ||
+                        !t.Name.Contains(" - Thread (", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (t.Samples.TimeDeltas is null || t.Samples.TimeDeltas.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var score = 0;
+                    foreach (var nameIndex in t.FuncTable.Name)
+                    {
+                        if (nameIndex < 0 || nameIndex >= t.StringArray.Count) continue;
+                        var s = t.StringArray[nameIndex];
+                        if (string.IsNullOrEmpty(s)) continue;
+
+                        // Prefer native module frames like "v8_libbase!0x..."
+                        if (s.Contains("v8", StringComparison.OrdinalIgnoreCase) && s.Contains("!", StringComparison.Ordinal))
+                        {
+                            score += s.StartsWith("v8", StringComparison.OrdinalIgnoreCase) ? 5 : 3;
+                        }
+                    }
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        best = t;
+                    }
+                }
+
+                return bestScore > 0 ? best : null;
+            }
+
+            void RenameThreadAsV8Sampler(FirefoxProfiler.Thread t)
+            {
+                var name = t.Name ?? string.Empty;
+                var split = name.IndexOf(" - ", StringComparison.Ordinal);
+                var prefix = split > 0 ? name.Substring(0, split) : string.Empty;
+                var tid = string.IsNullOrEmpty(t.Tid) ? "?" : t.Tid;
+                t.Name = split > 0 ? $"{prefix} - V8 - Sampler ({tid})" : $"V8 Sampler ({tid})";
+            }
+
+            var samplerThread = FindLikelyV8SamplerThread();
+            if (samplerThread is not null)
+            {
+                var etwFirstSampleMs = samplerThread.Samples.TimeDeltas![0];
+                var computedOffset = etwFirstSampleMs - v8FirstSampleDeltaMs;
+                if (!double.IsFinite(computedOffset) || computedOffset < 0)
+                {
+                    computedOffset = 0.0;
+                }
+
+                timeOffsetMs = computedOffset;
+                RenameThreadAsV8Sampler(samplerThread);
+            }
+            else
+            {
+                timeOffsetMs = 0.0;
+            }
+        }
+
+        // Build V8 node info + parent map (id -> parentId).
+        var nodesById = new Dictionary<int, (string FunctionName, string Url, int LineNumber0, int ColumnNumber0)>();
+        var parentById = new Dictionary<int, int>();
+
+        foreach (var node in nodesJson)
+        {
+            if (node is not JsonObject nodeObj) continue;
+
+            var idNode = nodeObj["id"];
+            if (idNode is null) continue;
+            var id = idNode.GetValue<int>();
+
+            var callFrame = nodeObj["callFrame"] as JsonObject;
+            var functionName = callFrame?["functionName"]?.GetValue<string>() ?? string.Empty;
+            var url = callFrame?["url"]?.GetValue<string>() ?? string.Empty;
+            var lineNumber0 = callFrame?["lineNumber"]?.GetValue<int>() ?? -1;
+            var columnNumber0 = callFrame?["columnNumber"]?.GetValue<int>() ?? -1;
+
+            nodesById[id] = (functionName, url, lineNumber0, columnNumber0);
+
+            var children = nodeObj["children"]?.AsArray();
+            if (children is null) continue;
+
+            foreach (var child in children)
+            {
+                if (child is null) continue;
+                var childId = child.GetValue<int>();
+                // In a V8 cpuprofile, this should be a tree. Keep the first parent we see.
+                parentById.TryAdd(childId, id);
+            }
+        }
+
+        var firstExistingThread = _profile.Threads.Count > 0 ? _profile.Threads[0] : null;
+        var pid = firstExistingThread?.Pid ?? "0";
+        var processName = firstExistingThread?.ProcessName ?? _profile.Meta.Product;
+
+        // Compute duration in ms for thread boundaries.
+        var sampleCount = Math.Min(samplesJson.Count, timeDeltasJson.Count);
+        double durationMs = 0;
+        for (var i = 0; i < sampleCount; i++)
+        {
+            var dtUs = timeDeltasJson[i]?.GetValue<long>() ?? 0;
+            durationMs += dtUs * MicrosecondsToMilliseconds;
+        }
+
+        var v8ThreadIndex = _profileThreadIndex;
+        var profileThread = new FirefoxProfiler.Thread
+        {
+            Name = "JS - V8 - CPU Profile",
+            ProcessName = processName,
+            ProcessStartupTime = timeOffsetMs,
+            RegisterTime = timeOffsetMs,
+            ProcessShutdownTime = timeOffsetMs + durationMs,
+            UnregisterTime = timeOffsetMs + durationMs,
+            ProcessType = "default",
+            Pid = pid,
+            Tid = "v8",
+            ShowMarkersInTimeline = true,
+            IsMainThread = false
+        };
+
+        var samples = profileThread.Samples;
+        samples.TimeDeltas = new List<double>(sampleCount);
+        samples.ThreadCPUDelta = new List<int?>(sampleCount);
+        samples.WeightType = "samples";
+
+        // Per-node caches for this V8 thread.
+        var nodeIdToFuncIndex = new Dictionary<int, int>();
+        var nodeIdToFrameIndex = new Dictionary<int, int>();
+        var nodeIdToStackIndex = new Dictionary<int, int>();
+
+        int ConvertV8Func(int nodeId)
+        {
+            if (nodeIdToFuncIndex.TryGetValue(nodeId, out var existing)) return existing;
+            if (!nodesById.TryGetValue(nodeId, out var nodeInfo))
+            {
+                // Unknown node id; add a placeholder.
+                var unknownIndex = profileThread.FuncTable.Length;
+                profileThread.FuncTable.Name.Add(GetOrCreateString($"(unknown:{nodeId})", profileThread));
+                profileThread.FuncTable.IsJS.Add(false);
+                profileThread.FuncTable.RelevantForJS.Add(false);
+                profileThread.FuncTable.Resource.Add(-1);
+                profileThread.FuncTable.FileName.Add(null);
+                profileThread.FuncTable.LineNumber.Add(null);
+                profileThread.FuncTable.ColumnNumber.Add(null);
+                profileThread.FuncTable.Length++;
+                nodeIdToFuncIndex[nodeId] = unknownIndex;
+                return unknownIndex;
+            }
+
+            var (functionNameRaw, url, lineNumber0, columnNumber0) = nodeInfo;
+            var functionName = string.IsNullOrEmpty(functionNameRaw) ? "(anonymous)" : functionNameRaw;
+
+            var hasSourceLocation = !string.IsNullOrEmpty(url) && lineNumber0 >= 0;
+            var isJs = hasSourceLocation;
+
+            var funcIndex = profileThread.FuncTable.Length;
+            nodeIdToFuncIndex[nodeId] = funcIndex;
+
+            profileThread.FuncTable.Name.Add(GetOrCreateString(functionName, profileThread));
+            profileThread.FuncTable.IsJS.Add(isJs);
+            profileThread.FuncTable.RelevantForJS.Add(isJs);
+            profileThread.FuncTable.Resource.Add(-1);
+
+            if (string.IsNullOrEmpty(url))
+            {
+                profileThread.FuncTable.FileName.Add(null);
+                profileThread.FuncTable.LineNumber.Add(null);
+                profileThread.FuncTable.ColumnNumber.Add(null);
+            }
+            else
+            {
+                profileThread.FuncTable.FileName.Add(GetOrCreateString(url, profileThread));
+                profileThread.FuncTable.LineNumber.Add(lineNumber0 >= 0 ? lineNumber0 + 1 : null);
+                profileThread.FuncTable.ColumnNumber.Add(columnNumber0 >= 0 ? columnNumber0 + 1 : null);
+            }
+
+            profileThread.FuncTable.Length++;
+            return funcIndex;
+        }
+
+        int ConvertV8Frame(int nodeId, out int category, out int subCategory)
+        {
+            if (nodeIdToFrameIndex.TryGetValue(nodeId, out var existing))
+            {
+                category = profileThread.FrameTable.Category[existing] ?? CategoryOther;
+                subCategory = profileThread.FrameTable.Subcategory[existing] ?? 0;
+                return existing;
+            }
+
+            category = CategoryOther;
+            subCategory = 0;
+
+            if (nodesById.TryGetValue(nodeId, out var nodeInfo))
+            {
+                var (_, url, lineNumber0, _) = nodeInfo;
+                if (string.IsNullOrEmpty(url) || lineNumber0 < 0)
+                {
+                    // Builtins / native frames typically have no URL or line info.
+                    category = CategoryNative;
+                }
+            }
+
+            var funcIndex = ConvertV8Func(nodeId);
+
+            var frameIndex = profileThread.FrameTable.Length;
+            nodeIdToFrameIndex[nodeId] = frameIndex;
+
+            profileThread.FrameTable.Address.Add(0);
+            profileThread.FrameTable.InlineDepth.Add(0);
+            profileThread.FrameTable.Category.Add(category);
+            profileThread.FrameTable.Subcategory.Add(subCategory);
+            profileThread.FrameTable.Func.Add(funcIndex);
+            profileThread.FrameTable.NativeSymbol.Add(null);
+            profileThread.FrameTable.InnerWindowID.Add(null);
+            profileThread.FrameTable.Implementation.Add(null);
+
+            if (nodesById.TryGetValue(nodeId, out var node))
+            {
+                profileThread.FrameTable.Line.Add(node.LineNumber0 >= 0 ? node.LineNumber0 + 1 : null);
+                profileThread.FrameTable.Column.Add(node.ColumnNumber0 >= 0 ? node.ColumnNumber0 + 1 : null);
+            }
+            else
+            {
+                profileThread.FrameTable.Line.Add(null);
+                profileThread.FrameTable.Column.Add(null);
+            }
+
+            profileThread.FrameTable.Length++;
+            return frameIndex;
+        }
+
+        int ConvertV8Stack(int nodeId)
+        {
+            if (nodeId <= 0) return -1;
+            if (!nodesById.TryGetValue(nodeId, out var nodeInfo)) return -1;
+
+            // Skip the synthetic "(root)" node so it doesn't dominate the tree.
+            if (string.Equals(nodeInfo.FunctionName, "(root)", StringComparison.Ordinal)) return -1;
+
+            if (nodeIdToStackIndex.TryGetValue(nodeId, out var existing)) return existing;
+
+            var parentNodeId = parentById.TryGetValue(nodeId, out var parent) ? parent : -1;
+            var parentStackIndex = ConvertV8Stack(parentNodeId);
+
+            var stackIndex = profileThread.StackTable.Length;
+            nodeIdToStackIndex[nodeId] = stackIndex;
+
+            var frameIndex = ConvertV8Frame(nodeId, out var category, out var subCategory);
+            profileThread.StackTable.Frame.Add(frameIndex);
+            profileThread.StackTable.Category.Add(category);
+            profileThread.StackTable.Subcategory.Add(subCategory);
+            profileThread.StackTable.Prefix.Add(parentStackIndex < 0 ? null : parentStackIndex);
+            profileThread.StackTable.Length++;
+
+            return stackIndex;
+        }
+
+        for (var i = 0; i < sampleCount; i++)
+        {
+            var nodeId = samplesJson[i]?.GetValue<int>() ?? -1;
+            var stackIndex = ConvertV8Stack(nodeId);
+            samples.Stack.Add(stackIndex < 0 ? null : stackIndex);
+
+            var dtUs = timeDeltasJson[i]?.GetValue<long>() ?? 0;
+            var dtMs = dtUs * MicrosecondsToMilliseconds;
+            if (i == 0)
+            {
+                // Shift the V8 timeline into the ETW timeline.
+                dtMs += timeOffsetMs;
+            }
+            samples.TimeDeltas!.Add(dtMs);
+
+            var dtNs = dtUs * 1000L;
+            samples.ThreadCPUDelta!.Add((int)Math.Min(dtNs, int.MaxValue));
+
+            samples.Length++;
+        }
+
+        _profile.Threads.Add(profileThread);
+        _profile.Meta.InitialVisibleThreads?.Add(v8ThreadIndex);
+        _profileThreadIndex++;
+
+        // Extend profiling time range if needed (relative ms).
+        var v8Start = timeOffsetMs;
+        var v8End = timeOffsetMs + durationMs;
+        if (v8Start < _profile.Meta.ProfilingStartTime) _profile.Meta.ProfilingStartTime = v8Start;
+        if (v8End > _profile.Meta.ProfilingEndTime) _profile.Meta.ProfilingEndTime = v8End;
     }
 
     /// <summary>

@@ -239,6 +239,31 @@ public class EtwUltraProfiler : IDisposable
                     ultraProfilerOptions.LogProgress?.Invoke($"Start Profiling Process {process.ProcessName} ({process.Id})");
                 }
 
+                V8InspectorClient? v8Client = null;
+                var v8Enabled = await V8InspectorClient.IsInspectorAvailableAsync("127.0.0.1", 8080, timeoutMs: 200);
+                if (v8Enabled)
+                {
+                    v8Client = new V8InspectorClient("127.0.0.1", 8080);
+                    ultraProfilerOptions.LogProgress?.Invoke($"[V8] Inspector detected on 127.0.0.1:8080, connecting...");
+
+                    using var v8ConnectCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    if (await v8Client.ConnectAsync(v8ConnectCts.Token))
+                    {
+                        await v8Client.StartProfilingAsync();
+                        ultraProfilerOptions.LogProgress?.Invoke($"[V8] Connected & Profiling Started!");
+                    }
+                    else
+                    {
+                        ultraProfilerOptions.LogProgress?.Invoke($"[V8] Connect failed, skipping V8 profiling.");
+                        v8Client.Dispose();
+                        v8Client = null;
+                    }
+                }
+                else
+                {
+                    ultraProfilerOptions.LogProgress?.Invoke($"[V8] No inspector on 127.0.0.1:8080, skipping V8 profiling.");
+                }
+
                 // Collect the data until all processes have exited or there is a cancel request
                 HashSet<Process> exitedProcessList = new();
                 while (!_cancelRequested)
@@ -283,6 +308,19 @@ public class EtwUltraProfiler : IDisposable
                 _userSession.Stop();
 
                 ultraProfilerOptions.LogProgress?.Invoke(singleProcess is not null ? $"End Profiling Process" : $"End Profiling {processList.Count} Processes");
+
+                if (v8Client?.IsConnected == true)
+                {
+                    ultraProfilerOptions.LogProgress?.Invoke($"[V8] Stopping & Downloading Profile...");
+                    var jsonContent = await v8Client.StopProfilingAsync();
+                    if (!string.IsNullOrEmpty(jsonContent))
+                    {
+                        var v8FileName = $"{(ultraProfilerOptions.BaseOutputFileName ?? baseName)}.cpuprofile";
+                        await File.WriteAllTextAsync(v8FileName, jsonContent);
+                        ultraProfilerOptions.LogProgress?.Invoke($"[V8] Profile saved to {v8FileName}");
+                    }
+                }
+                v8Client?.Dispose();
 
                 await WaitForStaleFile(userFileName, ultraProfilerOptions);
                 await WaitForStaleFile(kernelFileName, ultraProfilerOptions);
@@ -476,6 +514,14 @@ public class EtwUltraProfiler : IDisposable
             TraceEventLevel.Verbose, // 捕获所有事件
             0xFFFFFFFFFFFFFFFF,      // 启用所有关键字 (Keywords)
             options);
+
+
+        //var jsProviderGuid = TraceEventProviders.GetProviderGuidByName("Microsoft-JScript");
+        //_userSession.EnableProvider(
+        //    jsProviderGuid,
+        //    TraceEventLevel.Verbose, // 捕获所有事件
+        //    0xFFFFFFFFFFFFFFFF,      // 启用所有关键字 (Keywords)
+        //    options);
 
         // Reset the clock to account for the duration of the profiler
         _profilerClock.Restart();
