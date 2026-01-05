@@ -337,9 +337,10 @@ public sealed class EtwConverterToFirefox : IDisposable
             }
         }
 
-        // Build V8 node info + parent map (id -> parentId).
+        // Build V8 node info + parent map (childId -> parentId) + children map (id -> childIds).
         var nodesById = new Dictionary<int, (string FunctionName, string Url, int LineNumber0, int ColumnNumber0)>();
         var parentById = new Dictionary<int, int>();
+        var childrenById = new Dictionary<int, List<int>>();
 
         foreach (var node in nodesJson)
         {
@@ -360,12 +361,14 @@ public sealed class EtwConverterToFirefox : IDisposable
             var children = nodeObj["children"]?.AsArray();
             if (children is null) continue;
 
+            var childList = childrenById.TryGetValue(id, out var existingList) ? existingList : (childrenById[id] = new List<int>(children.Count));
             foreach (var child in children)
             {
                 if (child is null) continue;
                 var childId = child.GetValue<int>();
                 // In a V8 cpuprofile, this should be a tree. Keep the first parent we see.
                 parentById.TryAdd(childId, id);
+                childList.Add(childId);
             }
         }
 
@@ -407,6 +410,35 @@ public sealed class EtwConverterToFirefox : IDisposable
         var nodeIdToFuncIndex = new Dictionary<int, int>();
         var nodeIdToFrameIndex = new Dictionary<int, int>();
         var nodeIdToStackIndex = new Dictionary<int, int>();
+        var nodeIdToHasJsInSubtree = new Dictionary<int, bool>();
+
+        bool IsV8JsNode(int nodeId)
+        {
+            if (!nodesById.TryGetValue(nodeId, out var nodeInfo)) return false;
+            return !string.IsNullOrEmpty(nodeInfo.Url) && nodeInfo.LineNumber0 >= 0;
+        }
+
+        bool HasJsInSubtree(int nodeId)
+        {
+            if (nodeId <= 0) return false;
+            if (nodeIdToHasJsInSubtree.TryGetValue(nodeId, out var cached)) return cached;
+
+            var hasJs = IsV8JsNode(nodeId);
+            if (!hasJs && childrenById.TryGetValue(nodeId, out var children))
+            {
+                foreach (var childId in children)
+                {
+                    if (HasJsInSubtree(childId))
+                    {
+                        hasJs = true;
+                        break;
+                    }
+                }
+            }
+
+            nodeIdToHasJsInSubtree[nodeId] = hasJs;
+            return hasJs;
+        }
 
         int ConvertV8Func(int nodeId)
         {
@@ -472,11 +504,25 @@ public sealed class EtwConverterToFirefox : IDisposable
 
             if (nodesById.TryGetValue(nodeId, out var nodeInfo))
             {
-                var (_, url, lineNumber0, _) = nodeInfo;
-                if (string.IsNullOrEmpty(url) || lineNumber0 < 0)
+                // Special-case: "(program)" is essentially "V8 idle / not executing JS".
+                if (string.Equals(nodeInfo.FunctionName, "(program)", StringComparison.Ordinal))
+                {
+                    category = CategoryOther;
+                }
+                else if (HasJsInSubtree(nodeId))
+                {
+                    // If any JS function appears in this stack (tree branch), color the whole stack consistently.
+                    // We reuse the existing ".NET" category because it's green in this profile.
+                    category = CategoryManaged;
+                }
+                else if (string.IsNullOrEmpty(nodeInfo.Url) || nodeInfo.LineNumber0 < 0)
                 {
                     // Builtins / native frames typically have no URL or line info.
                     category = CategoryNative;
+                }
+                else
+                {
+                    category = CategoryManaged;
                 }
             }
 
